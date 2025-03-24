@@ -14,93 +14,54 @@ app.use(cors());
 app.use(express.json());
 
 const cache = new NodeCache({ stdTTL: 86400 }); // Cache for 24 hours
-const API_URL = "https://torrent-fast-api.onrender.com/api/v1";
 
-// Fetch and cache movies
-const fetchMovies = async (endpoint, cacheKey) => {
-    try {
-        const response = await axios.get(`${API_URL}/${endpoint}?site=yts&limit=50`);
-        const movies = response.data.data.filter(movie => movie.name && movie.poster && movie.rating);
-        cache.set(cacheKey, movies);
-        return movies;
-    } catch (error) {
-        console.error(`Error fetching ${cacheKey}:`, error);
-        return cache.get(cacheKey) || []; // Return old data if API call fails
-    }
-};
-
-// Background job to refresh cache every hour
-const refreshCache = async () => {
-    console.log("Refreshing movie cache...");
-    await fetchMovies("trending", "trending_movies");
-    await fetchMovies("recent", "recent_movies");
-};
-
-// Run cache refresh every 1 day
-setInterval(refreshCache, 24 * 60 * 60 * 1000);
-
-// API Endpoints
-app.get("/movies/trending", async (req, res) => {
-    const movies = cache.get("trending_movies") || (await fetchMovies("trending", "trending_movies"));
-    res.json(movies);
-});
-
-app.get("/movies/recent", async (req, res) => {
-    const movies = cache.get("recent_movies") || (await fetchMovies("recent", "recent_movies"));
-    res.json(movies);
-});
-
-app.get("/movies/search", async (req, res) => {
-    const { query, page = 1 } = req.query;
-    if (!query) return res.status(400).json({ error: "Query is required!" });
-
-    const cacheKey = `search_${query}_${page}`;
-    if (cache.has(cacheKey)) return res.json(cache.get(cacheKey));
-
-    try {
-        const response = await axios.get(`${API_URL}/search?site=yts&query=${query}&limit=10&page=${page}`);
-        const movies = response.data.data.filter(movie => movie.name && movie.poster && movie.rating);
-        cache.set(cacheKey, movies, 86400); // Cache search results for 24 hours
-        res.json(movies);
-    } catch (error) {
-        res.status(500).json({ error: "Error fetching search results." });
-    }
-});
-
-app.get("/movies/all", async (req, res) => {
-    const { query } = req.query;
-    if (!query) return res.status(400).json({ error: "Query is required!" });
-
-    const cacheKey = `all_search_${query}`;
-    if (cache.has(cacheKey)) return res.json(cache.get(cacheKey));
-
-    try {
-        const response = await axios.get(`${API_URL}/all/search?query=${query}&limit=0`);
-        const movies = response.data.data.filter(movie => movie.name && movie.poster); // Removed movie.rating check
-        cache.set(cacheKey, movies, 86400);
-        res.json(movies);
-    } catch (error) {
-        res.status(500).json({ error: "Error fetching all search results." });
-    }
-});
 // Endpoint to list files in the torrent (videos, images & inside ZIPs)
-app.get('/list-files/:magnet', (req, res) => {
-  const magnet = req.params.magnet;
-  const infoHash = extractInfoHash(magnet);
+app.get('/list-files/:torrentIdentifier', async (req, res) => {
+  try {
+    const torrentIdentifier = req.params.torrentIdentifier;
+    
+    // Check if it's a magnet link
+    if (torrentIdentifier.startsWith('magnet:')) {
+      const infoHash = extractInfoHash(torrentIdentifier);
+      if (!infoHash) {
+        return res.status(400).send('Invalid magnet link');
+      }
 
-  if (!infoHash) {
-    return res.status(400).send('Invalid magnet link');
+      const existingTorrent = client.torrents.find((torrent) => torrent.infoHash === infoHash);
+      if (existingTorrent) {
+        const files = await getFiles(existingTorrent);
+        return res.json(files);
+      }
+
+      client.add(torrentIdentifier, (torrent) => {
+        getFiles(torrent).then((files) => res.json(files));
+      });
+    } 
+    // Handle .torrent file URLs
+    else if (torrentIdentifier.startsWith('http')) {
+      const cachedFiles = cache.get(torrentIdentifier);
+      if (cachedFiles) {
+        return res.json(cachedFiles);
+      }
+
+      const response = await axios.get(torrentIdentifier, {
+        responseType: 'arraybuffer'
+      });
+      
+      const torrentBuffer = Buffer.from(response.data);
+      client.add(torrentBuffer, (torrent) => {
+        getFiles(torrent).then((files) => {
+          cache.set(torrentIdentifier, files);
+          res.json(files);
+        });
+      });
+    } else {
+      return res.status(400).send('Invalid torrent identifier - must be magnet link or .torrent URL');
+    }
+  } catch (error) {
+    console.error('Error in list-files:', error);
+    res.status(500).send('Error processing torrent');
   }
-
-  const existingTorrent = client.torrents.find((torrent) => torrent.infoHash === infoHash);
-
-  if (existingTorrent) {
-    return getFiles(existingTorrent).then((files) => res.json(files));
-  }
-
-  client.add(magnet, (torrent) => {
-    getFiles(torrent).then((files) => res.json(files));
-  });
 });
 
 // Helper to extract infoHash from magnet link
@@ -181,15 +142,24 @@ function getFileType(fileName) {
 }
 
 // Endpoint to stream a specific video file
-app.get('/stream/:magnet/:filename', (req, res) => {
-  const { magnet, filename } = req.params;
-  const infoHash = extractInfoHash(magnet);
-
-  if (!infoHash) {
-    return res.status(400).send('Invalid magnet link');
+app.get('/stream/:torrentIdentifier/:filename', (req, res) => {
+  const { torrentIdentifier, filename } = req.params;
+  
+  let torrent;
+  
+  if (torrentIdentifier.startsWith('magnet:')) {
+    const infoHash = extractInfoHash(torrentIdentifier);
+    if (!infoHash) {
+      return res.status(400).send('Invalid magnet link');
+    }
+    torrent = client.torrents.find((t) => t.infoHash === infoHash);
+  } else if (torrentIdentifier.startsWith('http')) {
+    // Find torrent by its URL
+    torrent = client.torrents.find((t) => {
+      return t.announce && t.announce.some(url => url.includes(new URL(torrentIdentifier).hostname));
+    });
   }
-
-  const torrent = client.torrents.find((t) => t.infoHash === infoHash);
+  
   if (!torrent) {
     return res.status(404).send('Torrent not found');
   }
