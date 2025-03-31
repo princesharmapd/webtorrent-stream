@@ -78,14 +78,7 @@ app.get('/list-files/:torrentIdentifier', async (req, res) => {
   }
 });
 
-// Helper function to determine file type
-const getFileType = (fileName) => {
-  const extension = path.extname(fileName).toLowerCase();
-  if (['.mp4', '.mkv', '.avi', '.mov'].includes(extension)) return 'video';
-  if (['.mp3', '.flac', '.wav'].includes(extension)) return 'audio';
-  if (['.jpg', '.jpeg', '.png', '.gif'].includes(extension)) return 'image';
-  return 'other';
-};
+
 // Stream endpoint with format support
 app.get('/stream/:torrentIdentifier/:filename', async (req, res) => {
   try {
