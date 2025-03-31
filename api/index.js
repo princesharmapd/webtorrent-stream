@@ -26,7 +26,6 @@ app.get('/health-check', (req, res) => {
 });
 
 // List files endpoint
-// Updated endpoint to list files, including folders
 app.get('/list-files/:torrentIdentifier', async (req, res) => {
   try {
     const torrentIdentifier = decodeURIComponent(req.params.torrentIdentifier);
@@ -69,7 +68,6 @@ app.get('/list-files/:torrentIdentifier', async (req, res) => {
   }
 });
 
-
 // Stream endpoint with format support
 app.get('/stream/:torrentIdentifier/:filename', async (req, res) => {
   try {
@@ -107,14 +105,13 @@ app.get('/stream/:torrentIdentifier/:filename', async (req, res) => {
       // Dynamic content type based on file extension
       const contentType = getContentType(file.name);
       
-    res.writeHead(206, {
-  'Content-Range': `bytes ${start}-${chunkEnd}/${fileSize}`,
-  'Accept-Ranges': 'bytes',
-  'Content-Length': contentLength,
-  'Content-Type': contentType,
-  'Cache-Control': 'no-cache'
-});
-
+      res.writeHead(206, {
+        'Content-Range': `bytes ${start}-${chunkEnd}/${fileSize}`,
+        'Accept-Ranges': 'bytes',
+        'Content-Length': contentLength,
+        'Content-Type': contentType,
+        'Cache-Control': 'no-cache'
+      });
 
       const stream = file.createReadStream({ start, end: chunkEnd });
       stream.on('error', err => console.error('Stream error:', err));
@@ -122,7 +119,7 @@ app.get('/stream/:torrentIdentifier/:filename', async (req, res) => {
       stream.pipe(res);
       
     } else if (fileType === 'image') {
-      res.setHeader('Content-Type', image/${path.extname(file.name).substring(1)});
+      res.setHeader('Content-Type', `image/${path.extname(file.name).substring(1)}`);
       res.setHeader('Cache-Control', 'public, max-age=86400');
       file.createReadStream().pipe(res);
       
@@ -222,5 +219,5 @@ function extractZip(zipFile) {
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(Server running on port ${PORT});
+  console.log(`Server running on port ${PORT}`);
 });
