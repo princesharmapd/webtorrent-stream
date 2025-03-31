@@ -24,16 +24,7 @@ const cache = new NodeCache({ stdTTL: 86400 }); // Cache for 24 hours
 app.get('/health-check', (req, res) => {
   res.json({ status: 'ok', time: new Date(), torrents: client.torrents.length });
 });
-// Helper function to extract file structure
-const getFiles = async (torrent) => {
-  return torrent.files.map(file => ({
-    name: file.name,
-    length: file.length,
-    type: getFileType(file.name),
-    path: file.path, // Full path including folder structure
-    folder: path.dirname(file.path), // Extract folder name
-  }));
-};
+
 // List files endpoint
 // Updated endpoint to list files, including folders
 app.get('/list-files/:torrentIdentifier', async (req, res) => {
