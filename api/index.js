@@ -24,8 +24,18 @@ const cache = new NodeCache({ stdTTL: 86400 }); // Cache for 24 hours
 app.get('/health-check', (req, res) => {
   res.json({ status: 'ok', time: new Date(), torrents: client.torrents.length });
 });
-
+// Helper function to extract file structure
+const getFiles = async (torrent) => {
+  return torrent.files.map(file => ({
+    name: file.name,
+    length: file.length,
+    type: getFileType(file.name),
+    path: file.path, // Full path including folder structure
+    folder: path.dirname(file.path), // Extract folder name
+  }));
+};
 // List files endpoint
+// Updated endpoint to list files, including folders
 app.get('/list-files/:torrentIdentifier', async (req, res) => {
   try {
     const torrentIdentifier = decodeURIComponent(req.params.torrentIdentifier);
@@ -68,6 +78,14 @@ app.get('/list-files/:torrentIdentifier', async (req, res) => {
   }
 });
 
+// Helper function to determine file type
+const getFileType = (fileName) => {
+  const extension = path.extname(fileName).toLowerCase();
+  if (['.mp4', '.mkv', '.avi', '.mov'].includes(extension)) return 'video';
+  if (['.mp3', '.flac', '.wav'].includes(extension)) return 'audio';
+  if (['.jpg', '.jpeg', '.png', '.gif'].includes(extension)) return 'image';
+  return 'other';
+};
 // Stream endpoint with format support
 app.get('/stream/:torrentIdentifier/:filename', async (req, res) => {
   try {
