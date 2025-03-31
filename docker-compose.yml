@@ -3,6 +3,7 @@ services:
   api:
     build: .
     ports:
-      - "3000:3000"
+      - "10000:3000" # Match this with Render’s expected port
     environment:
       - NODE_ENV=production
+      - PORT=3000 # Ensure Render can dynamically set this
