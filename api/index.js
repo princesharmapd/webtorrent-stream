@@ -107,13 +107,14 @@ app.get('/stream/:torrentIdentifier/:filename', async (req, res) => {
       // Dynamic content type based on file extension
       const contentType = getContentType(file.name);
       
-      res.writeHead(206, {
-        'Content-Range': bytes ${start}-${chunkEnd}/${fileSize},
-        'Accept-Ranges': 'bytes',
-        'Content-Length': contentLength,
-        'Content-Type': contentType,
-        'Cache-Control': 'no-cache'
-      });
+    res.writeHead(206, {
+  'Content-Range': `bytes ${start}-${chunkEnd}/${fileSize}`,
+  'Accept-Ranges': 'bytes',
+  'Content-Length': contentLength,
+  'Content-Type': contentType,
+  'Cache-Control': 'no-cache'
+});
+
 
       const stream = file.createReadStream({ start, end: chunkEnd });
       stream.on('error', err => console.error('Stream error:', err));
