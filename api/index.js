@@ -1,26 +1,17 @@
 import express from 'express';
 import cors from 'cors';
 import WebTorrent from 'webtorrent';
-import path from 'path';
-import yauzl from 'yauzl';
 import NodeCache from "node-cache";
 import axios from "axios";
 
 const app = express();
 const client = new WebTorrent();
 
-// Enhanced CORS configuration
-app.use(cors({
-  origin: true,
-  credentials: true,
-  exposedHeaders: ['Content-Range', 'Accept-Ranges', 'Content-Length']
-}));
-
+app.use(cors());
 app.use(express.json());
+const cache = new NodeCache({ stdTTL: 86400 });
 
-const cache = new NodeCache({ stdTTL: 86400 }); // Cache for 24 hours
-
-// Health check endpoint
+// Health check
 app.get('/health-check', (req, res) => {
   res.json({ status: 'ok', time: new Date(), torrents: client.torrents.length });
 });
@@ -35,9 +26,7 @@ app.get('/list-files/:torrentIdentifier', async (req, res) => {
       if (!infoHash) return res.status(400).json({ error: 'Invalid magnet link' });
 
       const existingTorrent = client.torrents.find(t => t.infoHash === infoHash);
-      if (existingTorrent) {
-        return res.json(await getFiles(existingTorrent));
-      }
+      if (existingTorrent) return res.json(await getFiles(existingTorrent));
 
       client.add(torrentIdentifier, torrent => {
         getFiles(torrent).then(files => res.json(files));
@@ -68,156 +57,125 @@ app.get('/list-files/:torrentIdentifier', async (req, res) => {
   }
 });
 
-// Stream endpoint with format support
-app.get('/stream/:torrentIdentifier/:filename', async (req, res) => {
+// Download endpoint only
+// Download endpoint only
+app.get('/download/:torrentIdentifier/:filename', async (req, res) => {
+  let torrent;
+  let file;
+  let stream;
+
   try {
-    const torrentIdentifier = decodeURIComponent(req.params.torrentIdentifier);
-    const filename = decodeURIComponent(req.params.filename);
+    const { torrentIdentifier, filename } = req.params;
+    const decodedFilename = decodeURIComponent(filename);
     
-    let torrent;
     if (torrentIdentifier.startsWith('magnet:')) {
       const infoHash = extractInfoHash(torrentIdentifier);
-      if (!infoHash) return res.status(400).send('Invalid magnet link');
       torrent = client.torrents.find(t => t.infoHash === infoHash);
-    } else if (torrentIdentifier.startsWith('http')) {
+    } else {
       const hostname = new URL(torrentIdentifier).hostname;
-      torrent = client.torrents.find(t => {
-        return t.announce && t.announce.some(url => url.includes(hostname));
-      });
+      torrent = client.torrents.find(t => 
+        t.announce?.some(url => url.includes(hostname))
+      );
     }
-    
-    if (!torrent) return res.status(404).send('Torrent not found');
 
-    const file = torrent.files.find(f => f.name === filename);
+    if (!torrent) {
+      if (torrentIdentifier.startsWith('magnet:')) {
+        torrent = client.add(torrentIdentifier);
+      } else {
+        const response = await axios.get(torrentIdentifier, {
+          responseType: 'arraybuffer',
+          timeout: 10000
+        });
+        torrent = client.add(Buffer.from(response.data));
+      }
+      
+      await new Promise(resolve => torrent.on('metadata', resolve));
+    }
+
+    file = torrent.files.find(f => f.name === decodedFilename);
     if (!file) return res.status(404).send('File not found');
 
-    const fileType = getFileType(file.name);
+    // Set download headers
+    res.setHeader('Content-Disposition', `attachment; filename="${decodedFilename}"`);
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Length', file.length);
+    res.setHeader('Accept-Ranges', 'bytes');
+
+    // Handle range requests for streaming
     const range = req.headers.range;
+    if (range) {
+      const parts = range.replace(/bytes=/, "").split("-");
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : file.length - 1;
+      const chunksize = (end - start) + 1;
 
-    if (fileType === 'video') {
-      if (!range) return res.status(400).send('Range header required');
-
-      const fileSize = file.length;
-      const [start, end] = range.replace(/bytes=/, '').split('-').map(Number);
-      const chunkEnd = end || Math.min(start + 10 ** 6, fileSize - 1);
-      const contentLength = chunkEnd - start + 1;
-
-      // Dynamic content type based on file extension
-      const contentType = getContentType(file.name);
-      
       res.writeHead(206, {
-        'Content-Range': `bytes ${start}-${chunkEnd}/${fileSize}`,
-        'Accept-Ranges': 'bytes',
-        'Content-Length': contentLength,
-        'Content-Type': contentType,
-        'Cache-Control': 'no-cache'
+        'Content-Range': `bytes ${start}-${end}/${file.length}`,
+        'Content-Length': chunksize
       });
 
-      const stream = file.createReadStream({ start, end: chunkEnd });
-      stream.on('error', err => console.error('Stream error:', err));
-      res.on('close', () => stream.destroy());
-      stream.pipe(res);
-      
-    } else if (fileType === 'image') {
-      res.setHeader('Content-Type', `image/${path.extname(file.name).substring(1)}`);
-      res.setHeader('Cache-Control', 'public, max-age=86400');
-      file.createReadStream().pipe(res);
-      
+      stream = file.createReadStream({ start, end });
     } else {
-      return res.status(400).send('Unsupported file type');
+      stream = file.createReadStream();
     }
+
+    // Handle client disconnects
+    const cleanup = () => {
+      if (stream && !stream.destroyed) {
+        stream.destroy();
+      }
+      req.off('close', cleanup);
+      res.off('close', cleanup);
+      res.off('finish', cleanup);
+    };
+
+    req.on('close', cleanup);
+    res.on('close', cleanup);
+    res.on('finish', cleanup);
+
+    stream.on('error', (err) => {
+      if (!res.headersSent) {
+        res.status(500).end();
+      }
+      console.error('Stream error:', err.message);
+      cleanup();
+    });
+
+    stream.pipe(res);
+
   } catch (error) {
-    console.error('Stream error:', error);
-    res.status(500).send('Streaming error');
+    console.error('Download error:', error.message);
+    if (!res.headersSent) {
+      res.status(500).send('Download failed');
+    }
+    if (stream && !stream.destroyed) {
+      stream.destroy();
+    }
   }
 });
 
 // Helper functions
 function extractInfoHash(magnet) {
   const match = magnet.match(/urn:btih:([a-fA-F0-9]{40})/);
-  return match ? match[1].toLowerCase() : null;
+  return match?.[1]?.toLowerCase();
 }
 
-function getContentType(filename) {
-  const ext = path.extname(filename).toLowerCase();
-  const typeMap = {
-    '.mp4': 'video/mp4',
-    '.webm': 'video/webm',
-    '.ogg': 'video/ogg',
-    '.mov': 'video/quicktime',
-    '.avi': 'video/x-msvideo',
-    '.mkv': 'video/x-matroska'
-  };
-  return typeMap[ext] || 'video/mp4';
-}
-
-function getFileType(fileName) {
-  const ext = path.extname(fileName).toLowerCase();
-  const videoFormats = ['.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.wmv', '.m4v'];
-  const imageFormats = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'];
-  
-  if (videoFormats.includes(ext)) return 'video';
-  if (imageFormats.includes(ext)) return 'image';
-  if (ext === '.zip') return 'zip';
-  return 'other';
+function getFileType(filename) {
+  const ext = filename.split('.').pop().toLowerCase();
+  const video = ['mp4', 'mkv', 'avi', 'mov', 'webm'];
+  return video.includes(ext) ? 'video' : 'other';
 }
 
 async function getFiles(torrent) {
-  const fileList = [];
-  for (const file of torrent.files) {
-    if (getFileType(file.name) === 'zip') {
-      try {
-        fileList.push(...await extractZip(file));
-      } catch (err) {
-        console.error('Error extracting zip:', err);
-      }
-    } else {
-      fileList.push({
-        name: file.name,
-        length: file.length,
-        path: file.path,
-        type: getFileType(file.name),
-      });
-    }
-  }
-  return fileList;
+  return torrent.files.map(file => ({
+    name: file.name,
+    length: file.length,
+    type: getFileType(file.name),
+    path: file.path
+  }));
 }
 
-function extractZip(zipFile) {
-  return new Promise((resolve, reject) => {
-    const extractedFiles = [];
-    zipFile.createReadStream((err, stream) => {
-      if (err) return reject(err);
-      
-      let buffer = Buffer.alloc(0);
-      stream.on('data', chunk => buffer = Buffer.concat([buffer, chunk]));
-      stream.on('end', () => {
-        yauzl.fromBuffer(buffer, { lazyEntries: true }, (err, zip) => {
-          if (err) return reject(err);
-          
-          zip.readEntry();
-          zip.on('entry', entry => {
-            if (!entry.fileName.endsWith('/')) {
-              const fileType = getFileType(entry.fileName);
-              if (['video', 'image'].includes(fileType)) {
-                extractedFiles.push({
-                  name: entry.fileName,
-                  length: entry.uncompressedSize,
-                  path: zipFile.path + '/' + entry.fileName,
-                  type: fileType,
-                });
-              }
-            }
-            zip.readEntry();
-          });
-          zip.on('end', () => resolve(extractedFiles));
-        });
-      });
-    });
-  });
-}
-
-const PORT = process.env.PORT || 5000;
+const PORT = 5000;
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Server running on http://localhost:${PORT}`);
 });
