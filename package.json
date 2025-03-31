@@ -11,6 +11,7 @@
     "axios": "^1.8.4",
     "cors": "^2.8.5",
     "express": "^4.18.2",
+     "compression": "^1.7.4",
     "node-cache": "^5.1.2",
     "nodemon": "^3.1.9",
     "parse-torrent": "^11.0.18",
